@@ -1,0 +1,9 @@
+span {
+    display: inline-block;
+    width: 10px;
+    background-color: red;
+}
+
+span.wake {
+    background-color: green;
+}
