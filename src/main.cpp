@@ -142,6 +142,9 @@ void setupWebServer()
 }
 
 void setup() {
+  
+  btStop(); // disable bluetooth
+
   Serial.begin(9600);
 
   if (!SPIFFS.begin()) {
