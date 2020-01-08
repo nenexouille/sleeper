@@ -6,17 +6,19 @@
 #include <ESPAsyncWebServer.h>
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
+#include <ESPmDNS.h>
 
 AsyncWebServer server(80);
 
-const char* ssid     = "****";
-const char* password = "****";
+const char* directSsid = "SleeperConf";
 
-const int ledSleep = 25;
-const int ledWake  = 27;
-const int setupButton = 32;
+const int ledSleepPin    = 25;
+const int ledWakePin     = 27;
+const int setupButtonPin = 32;
 
-bool setupMode = false;
+bool setupMode      = false;
+bool credentialMode = false;
+
 DynamicJsonDocument jsonPlanning(8176);
 
 WiFiUDP ntpUDP;
@@ -26,20 +28,31 @@ void notFound(AsyncWebServerRequest *request) {
     request->send(404, "text/plain", "Not found");
 }
 
-void connectWiFi()
+bool connectWiFi()
 {
-    Serial.print("Connecting to ");
-    Serial.println(ssid);
+    StaticJsonDocument<1024> jsonSetup;
+    
+    File setupFile = SPIFFS.open("/setup.json", FILE_READ );
+    DeserializationError err = deserializeJson(jsonSetup, setupFile);
+    setupFile.close();
+    if (err) {
+      Serial.print(F("deserializeJson() failed with code "));
+      Serial.println(err.c_str());
+      return false;
+    }
+    
+    const char* ssid = jsonSetup["ssid"];
+    const char* password = jsonSetup["password"];
+    uint retryCount = 0;
+
+    Serial.println((String) "Connecting to " + ssid);
     WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
+    while (WiFi.status() != WL_CONNECTED && retryCount < 3) {
+        retryCount++;
         delay(500);
         Serial.print(".");
     }
-    // Print local IP address and start web server
-    Serial.println("");
-    Serial.println("WiFi connected.");
-    Serial.println("IP address: ");
-    Serial.println(WiFi.localIP());
+    return WiFi.status() == WL_CONNECTED;
 }
 
 void disconnectWiFi()
@@ -77,75 +90,102 @@ void loadPlanningFile()
   planningFile.close();
 }
 
+bool enterSetupMode()
+{
+  pinMode(setupButtonPin,INPUT_PULLUP);
+  return !digitalRead(setupButtonPin);
+}
+
+void initDirectWifi()
+{
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(directSsid);
+}
+
+void setupWebServer()
+{
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+      request->send(SPIFFS, "/sleeper.html", "text/html");
+  });
+  server.on("/planning.json", HTTP_GET, [](AsyncWebServerRequest *request){
+      request->send(SPIFFS, "/planning.json", "application/json");
+  });
+  server.on("/sleeper.js", HTTP_GET, [](AsyncWebServerRequest *request){
+      request->send(SPIFFS, "/sleeper.js", "application/javascript");
+  });
+  server.on("/sleeper.css", HTTP_GET, [](AsyncWebServerRequest *request){
+      request->send(SPIFFS, "/sleeper.css", "text/css");
+  });
+  server.on("/updatePlanning", HTTP_POST, [](AsyncWebServerRequest *request){
+    String message;
+    Serial.println("Nb args: " + request->args());
+    if (request->params()) {
+        message = request->getParam(0)->value();
+        
+        File planningFile = SPIFFS.open("/planning.json", FILE_WRITE );
+        if (planningFile.print(message)) {
+          Serial.println("File was written");
+        } else {
+          Serial.println("File write failed");
+        }
+        planningFile.close();
+        
+    } else {
+        message = "No message sent";
+    }
+    request->send(200, "text/plain", "");
+  });
+
+  server.onNotFound(notFound);
+
+  server.begin();
+}
+
 void setup() {
   Serial.begin(9600);
-  while (!Serial) continue;
-
-  pinMode(setupButton,INPUT_PULLUP);
 
   if (!SPIFFS.begin()) {
     Serial.println("ERROR while initializing SPIFFS");
     return;
   }
 
-  loadPlanningFile();
-  
-  connectWiFi();
+  if (!connectWiFi()) {
+    Serial.println("Entering CREDENTIALS MODE ...");
+    Serial.println("Please connect to http://192.168.4.1");
+    credentialMode = true;
+    initDirectWifi();
+    return;
+  }
 
-  if (!digitalRead(setupButton)) {
+  // Print local IP address and start web server
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  if (enterSetupMode()) {
     Serial.println("Entering SETUP MODE ...");
     setupMode = true;
-    
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(SPIFFS, "/sleeper.html", "text/html");
-    });
-    server.on("/planning.json", HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(SPIFFS, "/planning.json", "application/json");
-    });
-    server.on("/sleeper.js", HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(SPIFFS, "/sleeper.js", "application/javascript");
-    });
-    server.on("/sleeper.css", HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(SPIFFS, "/sleeper.css", "text/css");
-    });
-    server.on("/updatePlanning", HTTP_POST, [](AsyncWebServerRequest *request){
-      String message;
-      Serial.println("Nb args: " + request->args());
-      if (request->params()) {
-          message = request->getParam(0)->value();
-          //Serial.println(message);
-          
-          File planningFile = SPIFFS.open("/planning.json", FILE_WRITE );
-          if (planningFile.print(message)) {
-            Serial.println("File was written");
-          } else {
-            Serial.println("File write failed");
-          }
-          planningFile.close();
-          
-      } else {
-          message = "No message sent";
-      }
-      request->send(200, "text/plain", "");
-    });
 
-    server.onNotFound(notFound);
-
-    server.begin();
+    MDNS.begin("sleeper");
+    setupWebServer();
+    MDNS.addService("http", "tcp", 80);
 
   } else {
     Serial.println("Entering normal mode ...");
-    initTime();
-    pinMode(ledWake, OUTPUT);
-    pinMode(ledSleep, OUTPUT);
 
-    disconnectWiFi();  
+    loadPlanningFile();
+    connectWiFi();
+    
+    initTime();
+    pinMode(ledWakePin, OUTPUT);
+    pinMode(ledSleepPin, OUTPUT);
+
+    disconnectWiFi();
   }
   
 }
 
 void loop() {
-  if (setupMode) return;
+  if (setupMode || credentialMode) return;
 
   Serial.println((String)"Day :" + timeClient.getDay());
   Serial.println((String)"Hours :" + timeClient.getHours());
@@ -156,11 +196,11 @@ void loop() {
   
 
   if (isItTimeForWakeUp()) {
-    digitalWrite(ledWake, HIGH);
-    digitalWrite(ledSleep, LOW);
+    digitalWrite(ledWakePin, HIGH);
+    digitalWrite(ledSleepPin, LOW);
   } else {
-    digitalWrite(ledWake, LOW);
-    digitalWrite(ledSleep, HIGH);
+    digitalWrite(ledWakePin, LOW);
+    digitalWrite(ledSleepPin, HIGH);
   }
 
   delay(1000);
