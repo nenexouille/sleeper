@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <WiFi.h>
+#include <WiFiManager.h>
 #include <AsyncTCP.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
@@ -7,6 +7,7 @@
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
+
 
 AsyncWebServer server(80);
 
@@ -28,32 +29,6 @@ void notFound(AsyncWebServerRequest *request) {
     request->send(404, "text/plain", "Not found");
 }
 
-bool connectWiFi()
-{
-    StaticJsonDocument<1024> jsonSetup;
-    
-    File setupFile = SPIFFS.open("/setup.json", FILE_READ );
-    DeserializationError err = deserializeJson(jsonSetup, setupFile);
-    setupFile.close();
-    if (err) {
-      Serial.print(F("deserializeJson() failed with code "));
-      Serial.println(err.c_str());
-      return false;
-    }
-    
-    const char* ssid = jsonSetup["ssid"];
-    const char* password = jsonSetup["password"];
-    uint retryCount = 0;
-
-    Serial.println((String) "Connecting to " + ssid);
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED && retryCount < 3) {
-        retryCount++;
-        delay(500);
-        Serial.print(".");
-    }
-    return WiFi.status() == WL_CONNECTED;
-}
 
 void disconnectWiFi()
 {
@@ -96,11 +71,6 @@ bool enterSetupMode()
   return !digitalRead(setupButtonPin);
 }
 
-void initDirectWifi()
-{
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(directSsid);
-}
 
 void setupWebServer()
 {
@@ -144,22 +114,24 @@ void setupWebServer()
 void setup() {
   
   btStop(); // disable bluetooth
+  WiFi.mode(WIFI_STA);
 
   Serial.begin(9600);
+  //Serial.begin(115200);
 
   if (!SPIFFS.begin()) {
     Serial.println("ERROR while initializing SPIFFS");
     return;
   }
 
-  if (!connectWiFi()) {
-    Serial.println("Entering CREDENTIALS MODE ...");
-    Serial.println("Please connect to http://192.168.4.1");
-    credentialMode = true;
-    initDirectWifi();
-    return;
-  }
+  
+  WiFiManager wm;
+  //wm.resetSettings();
 
+  if(wm.autoConnect("SleeperAP")) {
+      Serial.println("Failed to connect");
+      // ESP.restart();
+  }
   // Print local IP address and start web server
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
@@ -176,7 +148,6 @@ void setup() {
     Serial.println("Entering normal mode ...");
 
     loadPlanningFile();
-    connectWiFi();
     
     initTime();
     pinMode(ledWakePin, OUTPUT);
