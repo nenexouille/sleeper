@@ -1,74 +1,56 @@
-#include <Arduino.h>
-#include <WiFiManager.h>
-#include <AsyncTCP.h>
-#include <NTPClient.h>
-#include <WiFiUdp.h>
-#include <ESPAsyncWebServer.h>
-#include <SPIFFS.h>
-#include <ArduinoJson.h>
-#include <ESPmDNS.h>
+#include <main.h>
 
+
+bool setupMode        = false;
+bool shouldSaveConfig = false;
 
 AsyncWebServer server(80);
-
-const char* directSsid = "SleeperConf";
-
-const int ledSleepPin    = 25;
-const int ledWakePin     = 27;
-const int setupButtonPin = 32;
-
-bool setupMode      = false;
-bool credentialMode = false;
-
 DynamicJsonDocument jsonPlanning(8176);
-
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "mafreebox.free.fr");
+ntp ntpClient;
 
 void notFound(AsyncWebServerRequest *request) {
     request->send(404, "text/plain", "Not found");
 }
 
-
-void disconnectWiFi()
+void saveConfigCallback()
 {
-    WiFi.mode(WIFI_OFF);
+  shouldSaveConfig = true;
 }
 
 void initTime()
 {
-    timeClient.begin();
-    timeClient.setTimeOffset(3600);
+    ntpClient.client->begin();
+    ntpClient.client->setTimeOffset(3600);
 
-    while(!timeClient.update()) {
-        timeClient.forceUpdate();
+    while(!ntpClient.client->update()) {
+        ntpClient.client->forceUpdate();
     }
 }
 
 bool isItTimeForWakeUp()
 {
-  return((bool) jsonPlanning[timeClient.getDay()][timeClient.getHours()][timeClient.getMinutes()<30?0:1]);
+  return((bool) jsonPlanning[ntpClient.client->getDay()][ntpClient.client->getHours()][ntpClient.client->getMinutes()<30?0:1]);
 }
 
 void loadPlanningFile()
 {
   Serial.println("Opening file");
   File planningFile = SPIFFS.open("/planning.json", FILE_READ );
-  
+
   Serial.println("Deserializing...");
   DeserializationError err = deserializeJson(jsonPlanning, planningFile);
 
   if (err) {
     Serial.print(F("deserializeJson() failed with code "));
     Serial.println(err.c_str());
-  }
+  }  
   planningFile.close();
 }
 
 bool enterSetupMode()
 {
-  pinMode(setupButtonPin,INPUT_PULLUP);
-  return !digitalRead(setupButtonPin);
+  pinMode(PIN_BUTTON_SETUP,INPUT_PULLUP);
+  return !digitalRead(PIN_BUTTON_SETUP);
 }
 
 
@@ -113,25 +95,47 @@ void setupWebServer()
 
 void setup() {
   
+  Serial.begin(921600);
   btStop(); // disable bluetooth
-  WiFi.mode(WIFI_STA);
 
-  Serial.begin(9600);
-  //Serial.begin(115200);
+  //WiFi.mode(WIFI_STA);
 
-  if (!SPIFFS.begin()) {
-    Serial.println("ERROR while initializing SPIFFS");
-    return;
+  if (SPIFFS.begin()) {
+    Serial.println(F("\nSPIFFS mounted"));
+  } else {
+    Serial.println(F("\nFailed to mount SPIFFS"));
   }
 
-  
-  WiFiManager wm;
-  //wm.resetSettings();
+  WiFiManagerParameter custom_ntp_server("ntp_server", "ntp server", NTP_SERVER, 255);
+  WiFiManager wifiManager;
 
-  if(wm.autoConnect("SleeperAP")) {
+  //wifiManager.resetSettings();
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+  wifiManager.addParameter(&custom_ntp_server);
+  
+  if(wifiManager.autoConnect(WIFI_CONFIG_SSID)) {
       Serial.println("Failed to connect");
       // ESP.restart();
   }
+
+  StaticJsonDocument<200> jsonConfig;
+
+  if (shouldSaveConfig) {
+    File configFile = SPIFFS.open("/config.json", FILE_WRITE);
+    Serial.println("saving config");
+    jsonConfig["ntp_server"] = (char*) custom_ntp_server.getValue();
+    serializeJson(jsonConfig, configFile);
+    configFile.close();
+  }
+
+  File configFile = SPIFFS.open("/config.json", FILE_READ);
+  if (!configFile) {
+    Serial.println("failed to open config file for writing");
+  }
+  deserializeJson(jsonConfig, configFile);
+  configFile.close();
+
+
   // Print local IP address and start web server
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
@@ -141,40 +145,44 @@ void setup() {
     setupMode = true;
 
     MDNS.begin("sleeper");
-    setupWebServer();
     MDNS.addService("http", "tcp", 80);
+    setupWebServer();
+    
 
   } else {
     Serial.println("Entering normal mode ...");
 
-    loadPlanningFile();
-    
-    initTime();
-    pinMode(ledWakePin, OUTPUT);
-    pinMode(ledSleepPin, OUTPUT);
+    pinMode(PIN_LED_WAKE, OUTPUT);
+    pinMode(PIN_LED_SLEEP, OUTPUT);
 
-    disconnectWiFi();
+    WiFiUDP ntpUDP;
+    ntpClient.client = new NTPClient (ntpUDP, jsonConfig["ntp_server"], 3600);
+    
+    loadPlanningFile();
+    initTime();
+
+    WiFi.mode(WIFI_OFF);
   }
   
 }
 
 void loop() {
-  if (setupMode || credentialMode) return;
+  if (setupMode) return;
 
-  Serial.println((String)"Day :" + timeClient.getDay());
-  Serial.println((String)"Hours :" + timeClient.getHours());
-  Serial.println((String)"Minutes :" + timeClient.getMinutes());
-  Serial.println((String)"Seconds :" + timeClient.getSeconds());
+  Serial.println((String)"Day :" + ntpClient.client->getDay());
+  Serial.println((String)"Hours :" + ntpClient.client->getHours());
+  Serial.println((String)"Minutes :" + ntpClient.client->getMinutes());
+  Serial.println((String)"Seconds :" + ntpClient.client->getSeconds());
   Serial.println((String)"is time ? :" + isItTimeForWakeUp());
   Serial.println((String)"---------");
   
 
   if (isItTimeForWakeUp()) {
-    digitalWrite(ledWakePin, HIGH);
-    digitalWrite(ledSleepPin, LOW);
+    digitalWrite(PIN_LED_WAKE, HIGH);
+    digitalWrite(PIN_LED_SLEEP, LOW);
   } else {
-    digitalWrite(ledWakePin, LOW);
-    digitalWrite(ledSleepPin, HIGH);
+    digitalWrite(PIN_LED_WAKE, LOW);
+    digitalWrite(PIN_LED_SLEEP, HIGH);
   }
 
   delay(1000);
